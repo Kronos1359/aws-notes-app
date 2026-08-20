@@ -1,5 +1,44 @@
 <script setup>
 import { ref, onMounted } from 'vue'
+import Login from './Login.vue'
+
+import {
+  handleCallback,
+  getTokens,
+  logout
+} from './auth'
+
+const isLoggedIn = ref(false)
+const authLoading = ref(true)
+
+async function initializeAuth() {
+  try {
+    const tokens = await handleCallback()
+
+    if (tokens) {
+      isLoggedIn.value = true
+      return
+    }
+
+    const existingTokens = getTokens()
+
+    if (existingTokens?.access_token) {
+      isLoggedIn.value = true
+    }
+  } catch (err) {
+    console.error('Authentication error:', err)
+
+    localStorage.removeItem('cognito_tokens')
+
+    isLoggedIn.value = false
+  } finally {
+    authLoading.value = false
+  }
+}
+
+function handleLogout() {
+  logout()
+}
 
 const API_URL =
   'https://m4ccmcmzmss5glgty5qtr74gty0bkjaa.lambda-url.us-east-1.on.aws'
@@ -201,15 +240,28 @@ function handleKeydown(event) {
   }
 }
 
-onMounted(() => {
-  getNotes()
+onMounted(async () => {
+  await initializeAuth()
+
+  if (isLoggedIn.value) {
+    await getNotes()
+  }
 
   window.addEventListener('keydown', handleKeydown)
 })
+
 </script>
 
 <template>
-  <div class="page">
+  <div v-if="authLoading">
+    <p>Loading...</p>
+  </div>
+
+  <Login
+    v-else-if="!isLoggedIn"
+  />
+
+  <div v-else class="page">
     <div class="app">
 
       <!-- HEADER -->
@@ -219,12 +271,23 @@ onMounted(() => {
           <p class="subtitle">AWS Notes App</p>
         </div>
 
-        <button
-          class="add-button"
-          @click="showForm = true"
-        >
-          Add Note
-        </button>
+        <div class="header-actions">
+
+          <button
+            class="add-button"
+            @click="showForm = true"
+          >
+            Add Note
+          </button>
+
+          <button
+            class="logout-button"
+            @click="handleLogout"
+          >
+            Logout
+          </button>
+
+        </div>
       </header>
 
 
@@ -1421,6 +1484,23 @@ textarea {
   background: var(--gray-700);
 
   border-color: var(--gray-700);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logout-button {
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-color: var(--border-strong);
+}
+
+.logout-button:hover {
+  background: var(--gray-50);
+  color: var(--text-primary);
 }
 
 
