@@ -16,7 +16,9 @@
     "@aws-sdk/lib-dynamodb": "^3.1111.0",
     "@aws-sdk/s3-request-presigner": "^3.1111.0",
     "@codegenie/serverless-express": "^5.0.0",
+    "cors": "^2.8.6",
     "express": "^5.2.1",
+    "jose": "^6.2.9",
     "multer": "^2.2.0"
   },
   "devDependencies": {

@@ -5,6 +5,7 @@ import Login from './Login.vue'
 import {
   handleCallback,
   getTokens,
+  getAccessToken,
   logout
 } from './auth'
 
@@ -41,7 +42,7 @@ function handleLogout() {
 }
 
 const API_URL =
-  'https://m4ccmcmzmss5glgty5qtr74gty0bkjaa.lambda-url.us-east-1.on.aws'
+  'http://localhost:3000'
 
 const notes = ref([])
 
@@ -52,6 +53,23 @@ const selectedImage = ref(null)
 
 const loading = ref(false)
 const error = ref('')
+
+async function apiFetch(url, options = {}) {
+  const token = getAccessToken()
+
+  if (!token) {
+    throw new Error('No authentication token available')
+  }
+
+  const headers = new Headers(options.headers || {})
+
+  headers.set('Authorization', `Bearer ${token}`)
+
+  return fetch(url, {
+    ...options,
+    headers
+  })
+}
 
 // Note viewer
 const selectedNote = ref(null)
@@ -64,7 +82,7 @@ async function getNotes() {
   try {
     error.value = ''
 
-    const response = await fetch(`${API_URL}/notes`)
+    const response = await apiFetch(`${API_URL}/notes`)
 
     if (!response.ok) {
       throw new Error(`Failed to fetch notes: ${response.status}`)
@@ -88,7 +106,7 @@ async function addNote() {
 
   try {
     // 1. Create the note in DynamoDB
-    const response = await fetch(`${API_URL}/notes`, {
+    const response = await apiFetch(`${API_URL}/notes`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -115,7 +133,7 @@ async function addNote() {
 
       formData.append('image', selectedImage.value)
 
-      const imageResponse = await fetch(
+      const imageResponse = await apiFetch(
         `${API_URL}/notes/${newNote.id}/image`,
         {
           method: 'POST',
@@ -169,7 +187,7 @@ async function updateNote(note) {
   }
 
   try {
-    const response = await fetch(`${API_URL}/notes/${note.id}`, {
+    const response = await apiFetch(`${API_URL}/notes/${note.id}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json'
@@ -203,7 +221,7 @@ async function deleteNote(id) {
   }
 
   try {
-    const response = await fetch(`${API_URL}/notes/${id}`, {
+    const response = await apiFetch(`${API_URL}/notes/${id}`, {
       method: 'DELETE'
     })
 

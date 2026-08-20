@@ -77,6 +77,12 @@ export function getTokens() {
   return JSON.parse(stored)
 }
 
+export function getAccessToken() {
+  const tokens = getTokens()
+
+  return tokens?.access_token || null
+}
+
 export function logout() {
   localStorage.removeItem('cognito_tokens')
 
