@@ -42,7 +42,7 @@ function handleLogout() {
 }
 
 const API_URL =
-  'http://localhost:3000'
+  'https://m4ccmcmzmss5glgty5qtr74gty0bkjaa.lambda-url.us-east-1.on.aws'
 
 const notes = ref([])
 
