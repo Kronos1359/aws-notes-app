@@ -8,9 +8,13 @@ const {
     DeleteCommand
 } = require("@aws-sdk/lib-dynamodb");
 
-const { GetObjectCommand } = require("@aws-sdk/client-s3");
+const {
+    GetObjectCommand,
+    PutObjectCommand,
+    DeleteObjectCommand
+} = require("@aws-sdk/client-s3");
+
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-const { PutObjectCommand } = require("@aws-sdk/client-s3");
 
 const docClient = require("../services/dynamodb");
 const s3Client = require("../services/s3");
@@ -21,8 +25,72 @@ const BUCKET_NAME = "aws-notes-app-images-474939504380";
 
 /*
 =========================================================
+HELPER: GET IMAGE KEYS
+
+Supports both:
+- old notes using imageKey
+- new notes using imageKeys[]
+=========================================================
+*/
+
+function getImageKeys(note) {
+    if (Array.isArray(note.imageKeys)) {
+        return note.imageKeys;
+    }
+
+    if (note.imageKey) {
+        return [note.imageKey];
+    }
+
+    return [];
+}
+
+
+/*
+=========================================================
+HELPER: ADD SIGNED IMAGE URLS
+=========================================================
+*/
+
+async function addImageUrls(note) {
+    const keys = getImageKeys(note);
+
+    const images = [];
+
+    for (const key of keys) {
+        const command = new GetObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: key
+        });
+
+        const url = await getSignedUrl(
+            s3Client,
+            command,
+            {
+                expiresIn: 3600
+            }
+        );
+
+        images.push({
+            key,
+            url
+        });
+    }
+
+    note.images = images;
+
+    // Backwards compatibility for the current frontend
+    if (images.length > 0) {
+        note.imageUrl = images[0].url;
+    }
+
+    return note;
+}
+
+
+/*
+=========================================================
 GET ALL NOTES
-Only return notes belonging to the logged-in user.
 =========================================================
 */
 
@@ -44,27 +112,13 @@ const getAllNotes = async (req, res) => {
 
         const notes = result.Items || [];
 
-        // Sort newest notes first
-        notes.sort((a, b) =>
-            new Date(b.createdAt) - new Date(a.createdAt)
+        notes.sort(
+            (a, b) =>
+                new Date(b.createdAt) - new Date(a.createdAt)
         );
 
-        // Generate signed URLs for this user's images
         for (const note of notes) {
-            if (note.imageKey) {
-                const imageCommand = new GetObjectCommand({
-                    Bucket: BUCKET_NAME,
-                    Key: note.imageKey
-                });
-
-                note.imageUrl = await getSignedUrl(
-                    s3Client,
-                    imageCommand,
-                    {
-                        expiresIn: 3600
-                    }
-                );
-            }
+            await addImageUrls(note);
         }
 
         res.json(notes);
@@ -82,7 +136,6 @@ const getAllNotes = async (req, res) => {
 /*
 =========================================================
 GET ONE NOTE
-Only the owner can access it.
 =========================================================
 */
 
@@ -109,27 +162,13 @@ const getNote = async (req, res) => {
 
         const note = result.Item;
 
-        // Ownership check
         if (note.userId !== userId) {
             return res.status(404).json({
                 message: "Note not found"
             });
         }
 
-        if (note.imageKey) {
-            const imageCommand = new GetObjectCommand({
-                Bucket: BUCKET_NAME,
-                Key: note.imageKey
-            });
-
-            note.imageUrl = await getSignedUrl(
-                s3Client,
-                imageCommand,
-                {
-                    expiresIn: 3600
-                }
-            );
-        }
+        await addImageUrls(note);
 
         res.json(note);
 
@@ -146,8 +185,6 @@ const getNote = async (req, res) => {
 /*
 =========================================================
 CREATE NOTE
-The userId comes from the verified Cognito token.
-NOT from the frontend.
 =========================================================
 */
 
@@ -167,7 +204,10 @@ const createNote = async (req, res) => {
             title,
             content,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+
+            // New notes start with an empty image array
+            imageKeys: []
         };
 
         const command = new PutCommand({
@@ -192,13 +232,13 @@ const createNote = async (req, res) => {
 /*
 =========================================================
 UPDATE NOTE
-Only the owner can update it.
 =========================================================
 */
 
 const updateNote = async (req, res) => {
     try {
         const id = req.params.id;
+
         const { title, content } = req.body;
 
         const userId = req.user.sub;
@@ -228,14 +268,17 @@ const updateNote = async (req, res) => {
 
         const result = await docClient.send(command);
 
+        await addImageUrls(result.Attributes);
+
         res.json(result.Attributes);
 
     } catch (error) {
         console.error(error);
 
-        // DynamoDB throws ConditionalCheckFailedException
-        // when the note belongs to somebody else.
-        if (error.name === "ConditionalCheckFailedException") {
+        if (
+            error.name ===
+            "ConditionalCheckFailedException"
+        ) {
             return res.status(404).json({
                 message: "Note not found"
             });
@@ -251,7 +294,8 @@ const updateNote = async (req, res) => {
 /*
 =========================================================
 DELETE NOTE
-Only the owner can delete it.
+
+Also removes all associated S3 images.
 =========================================================
 */
 
@@ -261,7 +305,56 @@ const deleteNote = async (req, res) => {
 
         const userId = req.user.sub;
 
-        const command = new DeleteCommand({
+
+        // First get the note
+        const getCommand = new GetCommand({
+            TableName: TABLE_NAME,
+
+            Key: {
+                id
+            }
+        });
+
+        const result = await docClient.send(getCommand);
+
+        if (!result.Item) {
+            return res.status(404).json({
+                message: "Note not found"
+            });
+        }
+
+        const note = result.Item;
+
+        if (note.userId !== userId) {
+            return res.status(404).json({
+                message: "Note not found"
+            });
+        }
+
+
+        // Delete all images belonging to this note
+        const imageKeys = getImageKeys(note);
+
+        for (const key of imageKeys) {
+            try {
+                await s3Client.send(
+                    new DeleteObjectCommand({
+                        Bucket: BUCKET_NAME,
+                        Key: key
+                    })
+                );
+            } catch (imageError) {
+                console.error(
+                    "Failed to delete S3 image:",
+                    key,
+                    imageError
+                );
+            }
+        }
+
+
+        // Delete DynamoDB note
+        const deleteCommand = new DeleteCommand({
             TableName: TABLE_NAME,
 
             Key: {
@@ -276,7 +369,7 @@ const deleteNote = async (req, res) => {
             }
         });
 
-        await docClient.send(command);
+        await docClient.send(deleteCommand);
 
         res.json({
             message: "Note deleted"
@@ -285,7 +378,10 @@ const deleteNote = async (req, res) => {
     } catch (error) {
         console.error(error);
 
-        if (error.name === "ConditionalCheckFailedException") {
+        if (
+            error.name ===
+            "ConditionalCheckFailedException"
+        ) {
             return res.status(404).json({
                 message: "Note not found"
             });
@@ -301,12 +397,10 @@ const deleteNote = async (req, res) => {
 /*
 =========================================================
 UPLOAD IMAGE
-Only the owner of the note can upload an image.
 
-S3 path becomes:
+Supports multiple images.
 
-users/<userId>/notes/<noteId>/<random>-<filename>
-
+Each upload appends to imageKeys[]
 =========================================================
 */
 
@@ -322,12 +416,8 @@ const uploadImage = async (req, res) => {
             });
         }
 
-        /*
-        -------------------------------------------------
-        First verify that this note belongs to the user.
-        -------------------------------------------------
-        */
 
+        // Verify note ownership
         const getCommand = new GetCommand({
             TableName: TABLE_NAME,
 
@@ -351,22 +441,12 @@ const uploadImage = async (req, res) => {
         }
 
 
-        /*
-        -------------------------------------------------
-        Create user-specific S3 key.
-        -------------------------------------------------
-        */
-
+        // Create S3 key
         const fileKey =
             `users/${userId}/notes/${noteId}/${crypto.randomUUID()}-${req.file.originalname}`;
 
 
-        /*
-        -------------------------------------------------
-        Upload image to S3.
-        -------------------------------------------------
-        */
-
+        // Upload to S3
         const command = new PutObjectCommand({
             Bucket: BUCKET_NAME,
 
@@ -380,11 +460,15 @@ const uploadImage = async (req, res) => {
         await s3Client.send(command);
 
 
-        /*
-        -------------------------------------------------
-        Store image key in DynamoDB.
-        -------------------------------------------------
-        */
+        // Add the image key to the existing array
+        const existingKeys =
+            getImageKeys(result.Item);
+
+        const newImageKeys = [
+            ...existingKeys,
+            fileKey
+        ];
+
 
         const updateCommand = new UpdateCommand({
             TableName: TABLE_NAME,
@@ -394,31 +478,41 @@ const uploadImage = async (req, res) => {
             },
 
             UpdateExpression:
-                "SET imageKey = :imageKey, updatedAt = :updatedAt",
+                "SET imageKeys = :imageKeys, updatedAt = :updatedAt",
 
             ConditionExpression:
                 "userId = :userId",
 
             ExpressionAttributeValues: {
-                ":imageKey": fileKey,
-                ":updatedAt": new Date().toISOString(),
+                ":imageKeys": newImageKeys,
+
+                ":updatedAt":
+                    new Date().toISOString(),
+
                 ":userId": userId
             },
 
             ReturnValues: "ALL_NEW"
         });
 
-        await docClient.send(updateCommand);
+        const updated =
+            await docClient.send(updateCommand);
 
         res.status(201).json({
             message: "Image uploaded",
-            key: fileKey
+
+            key: fileKey,
+
+            note: updated.Attributes
         });
 
     } catch (error) {
         console.error(error);
 
-        if (error.name === "ConditionalCheckFailedException") {
+        if (
+            error.name ===
+            "ConditionalCheckFailedException"
+        ) {
             return res.status(404).json({
                 message: "Note not found"
             });
@@ -431,11 +525,121 @@ const uploadImage = async (req, res) => {
 };
 
 
+/*
+=========================================================
+DELETE ONE IMAGE
+=========================================================
+*/
+
+const deleteImage = async (req, res) => {
+    try {
+        const noteId = req.params.id;
+
+        const { imageKey } = req.body;
+
+        const userId = req.user.sub;
+
+
+        // Get note
+        const getCommand = new GetCommand({
+            TableName: TABLE_NAME,
+
+            Key: {
+                id: noteId
+            }
+        });
+
+        const result =
+            await docClient.send(getCommand);
+
+        if (!result.Item) {
+            return res.status(404).json({
+                message: "Note not found"
+            });
+        }
+
+        const note = result.Item;
+
+        if (note.userId !== userId) {
+            return res.status(404).json({
+                message: "Note not found"
+            });
+        }
+
+
+        const existingKeys =
+            getImageKeys(note);
+
+        if (!existingKeys.includes(imageKey)) {
+            return res.status(404).json({
+                message: "Image not found"
+            });
+        }
+
+
+        // Delete S3 object
+        await s3Client.send(
+            new DeleteObjectCommand({
+                Bucket: BUCKET_NAME,
+                Key: imageKey
+            })
+        );
+
+
+        // Remove key from DynamoDB array
+        const remainingKeys =
+            existingKeys.filter(
+                key => key !== imageKey
+            );
+
+
+        const updateCommand = new UpdateCommand({
+            TableName: TABLE_NAME,
+
+            Key: {
+                id: noteId
+            },
+
+            UpdateExpression:
+                "SET imageKeys = :imageKeys, updatedAt = :updatedAt",
+
+            ConditionExpression:
+                "userId = :userId",
+
+            ExpressionAttributeValues: {
+                ":imageKeys": remainingKeys,
+
+                ":updatedAt":
+                    new Date().toISOString(),
+
+                ":userId": userId
+            },
+
+            ReturnValues: "ALL_NEW"
+        });
+
+        await docClient.send(updateCommand);
+
+        res.json({
+            message: "Image deleted"
+        });
+
+    } catch (error) {
+        console.error(error);
+
+        res.status(500).json({
+            message: "Failed to delete image"
+        });
+    }
+};
+
+
 module.exports = {
     getAllNotes,
     getNote,
     createNote,
     updateNote,
     deleteNote,
-    uploadImage
+    uploadImage,
+    deleteImage
 };

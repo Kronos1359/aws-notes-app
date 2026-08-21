@@ -12,6 +12,41 @@ import {
 const isLoggedIn = ref(false)
 const authLoading = ref(true)
 
+const API_URL =
+  'https://m4ccmcmzmss5glgty5qtr74gty0bkjaa.lambda-url.us-east-1.on.aws'
+
+const notes = ref([])
+
+const showForm = ref(false)
+const title = ref('')
+const content = ref('')
+const selectedImages = ref([])
+
+const loading = ref(false)
+const error = ref('')
+
+const selectedNote = ref(null)
+
+const showEditModal = ref(false)
+const editingNote = ref(null)
+const editTitle = ref('')
+const editContent = ref('')
+const editNewImages = ref([])
+const editExistingImages = ref([])
+
+const showDeleteModal = ref(false)
+const noteToDelete = ref(null)
+
+const editLoading = ref(false)
+const deleteLoading = ref(false)
+
+
+/*
+=========================================================
+AUTH
+=========================================================
+*/
+
 async function initializeAuth() {
   try {
     const tokens = await handleCallback()
@@ -26,33 +61,30 @@ async function initializeAuth() {
     if (existingTokens?.access_token) {
       isLoggedIn.value = true
     }
+
   } catch (err) {
     console.error('Authentication error:', err)
 
     localStorage.removeItem('cognito_tokens')
 
     isLoggedIn.value = false
+
   } finally {
     authLoading.value = false
   }
 }
 
+
 function handleLogout() {
   logout()
 }
 
-const API_URL =
-  'https://m4ccmcmzmss5glgty5qtr74gty0bkjaa.lambda-url.us-east-1.on.aws'
 
-const notes = ref([])
-
-const showForm = ref(false)
-const title = ref('')
-const content = ref('')
-const selectedImage = ref(null)
-
-const loading = ref(false)
-const error = ref('')
+/*
+=========================================================
+API
+=========================================================
+*/
 
 async function apiFetch(url, options = {}) {
   const token = getAccessToken()
@@ -71,12 +103,48 @@ async function apiFetch(url, options = {}) {
   })
 }
 
-// Note viewer
-const selectedNote = ref(null)
 
-function handleImage(event) {
-  selectedImage.value = event.target.files[0] || null
+/*
+=========================================================
+IMAGE HELPERS
+=========================================================
+*/
+
+function getNoteImages(note) {
+  if (Array.isArray(note?.images)) {
+    return note.images
+  }
+
+  // Backwards compatibility with old single-image notes
+  if (note?.imageUrl) {
+    return [
+      {
+        key: note.imageKey || '',
+        url: note.imageUrl
+      }
+    ]
+  }
+
+  return []
 }
+
+
+/*
+=========================================================
+CREATE IMAGE SELECTION
+=========================================================
+*/
+
+function handleImages(event) {
+  selectedImages.value = Array.from(event.target.files || [])
+}
+
+
+/*
+=========================================================
+GET NOTES
+=========================================================
+*/
 
 async function getNotes() {
   try {
@@ -89,11 +157,19 @@ async function getNotes() {
     }
 
     notes.value = await response.json()
+
   } catch (err) {
     console.error(err)
     error.value = 'Could not load notes.'
   }
 }
+
+
+/*
+=========================================================
+CREATE NOTE
+=========================================================
+*/
 
 async function addNote() {
   if (!title.value.trim() || !content.value.trim()) {
@@ -105,7 +181,7 @@ async function addNote() {
   error.value = ''
 
   try {
-    // 1. Create the note in DynamoDB
+    // Create note
     const response = await apiFetch(`${API_URL}/notes`, {
       method: 'POST',
       headers: {
@@ -125,13 +201,11 @@ async function addNote() {
 
     const newNote = await response.json()
 
-    console.log('Created note:', newNote)
-
-    // 2. Upload image if one was selected
-    if (selectedImage.value) {
+    // Upload every selected image
+    for (const image of selectedImages.value) {
       const formData = new FormData()
 
-      formData.append('image', selectedImage.value)
+      formData.append('image', image)
 
       const imageResponse = await apiFetch(
         `${API_URL}/notes/${newNote.id}/image`,
@@ -145,16 +219,17 @@ async function addNote() {
         const message = await imageResponse.text()
         console.error('Image upload error:', message)
 
-        alert('Note was created, but image upload failed.')
+        alert(
+          `Note was created, but ${image.name} could not be uploaded.`
+        )
       }
     }
 
-    // 3. Clear the form
+    // Reset form
     title.value = ''
     content.value = ''
-    selectedImage.value = null
+    selectedImages.value = []
 
-    // Reset file input
     const fileInput = document.querySelector('#image-input')
 
     if (fileInput) {
@@ -163,100 +238,355 @@ async function addNote() {
 
     showForm.value = false
 
-    // 4. Reload notes
     await getNotes()
+
   } catch (err) {
     console.error('Add note error:', err)
     error.value = 'Could not create note.'
+
   } finally {
     loading.value = false
   }
 }
 
-async function updateNote(note) {
-  const newTitle = prompt('Enter new title:', note.title)
 
-  if (newTitle === null) {
+/*
+=========================================================
+EDIT MODAL
+=========================================================
+*/
+
+function openEditModal(note) {
+  editingNote.value = note
+
+  editTitle.value = note.title
+  editContent.value = note.content
+
+  editExistingImages.value = [...getNoteImages(note)]
+
+  editNewImages.value = []
+
+  showEditModal.value = true
+
+  // Close viewer if editing from viewer
+  selectedNote.value = null
+}
+
+function closeEditModal(force = false) {
+  if (editLoading.value && !force) {
     return
   }
 
-  const newContent = prompt('Enter new content:', note.content)
+  showEditModal.value = false
 
-  if (newContent === null) {
+  editingNote.value = null
+  editTitle.value = ''
+  editContent.value = ''
+  editExistingImages.value = []
+  editNewImages.value = []
+}
+
+
+/*
+=========================================================
+EDIT IMAGE SELECTION
+=========================================================
+*/
+
+function handleEditImages(event) {
+  editNewImages.value = Array.from(event.target.files || [])
+}
+
+
+/*
+=========================================================
+REMOVE EXISTING IMAGE FROM EDIT MODAL
+
+This only removes it from the list for now.
+The actual S3/DynamoDB deletion happens when Save is clicked.
+=========================================================
+*/
+
+function removeExistingImage(index) {
+  editExistingImages.value.splice(index, 1)
+}
+
+
+/*
+=========================================================
+REMOVE NEWLY SELECTED IMAGE
+=========================================================
+*/
+
+function removeNewImage(index) {
+  editNewImages.value.splice(index, 1)
+}
+
+
+/*
+=========================================================
+SAVE EDIT
+=========================================================
+*/
+
+async function saveEdit() {
+  if (!editingNote.value) {
     return
   }
+
+  if (!editTitle.value.trim() || !editContent.value.trim()) {
+    alert('Please enter a title and content.')
+    return
+  }
+
+  editLoading.value = true
 
   try {
-    const response = await apiFetch(`${API_URL}/notes/${note.id}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        title: newTitle,
-        content: newContent
-      })
-    })
+    const noteId = editingNote.value.id
+
+    /*
+    -------------------------------------------------------
+    1. Update title/content
+    -------------------------------------------------------
+    */
+
+    const response = await apiFetch(
+      `${API_URL}/notes/${noteId}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          title: editTitle.value,
+          content: editContent.value
+        })
+      }
+    )
 
     if (!response.ok) {
       throw new Error('Failed to update note')
     }
 
-    // If the edited note is currently open,
-    // close the viewer and refresh the notes.
-    selectedNote.value = null
+
+    /*
+    -------------------------------------------------------
+    2. Determine which existing images were removed
+    -------------------------------------------------------
+    */
+
+    const originalImages =
+      getNoteImages(editingNote.value)
+
+    const remainingKeys =
+      new Set(
+        editExistingImages.value.map(image => image.key)
+      )
+
+    const removedImages =
+      originalImages.filter(
+        image =>
+          image.key &&
+          !remainingKeys.has(image.key)
+      )
+
+
+    /*
+    -------------------------------------------------------
+    3. Delete removed images
+    -------------------------------------------------------
+    */
+
+    for (const image of removedImages) {
+      const deleteResponse = await apiFetch(
+        `${API_URL}/notes/${noteId}/image`,
+        {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            imageKey: image.key
+          })
+        }
+      )
+
+      if (!deleteResponse.ok) {
+        console.error(
+          'Failed to delete image:',
+          image.key
+        )
+      }
+    }
+
+
+    /*
+    -------------------------------------------------------
+    4. Upload newly selected images
+    -------------------------------------------------------
+    */
+
+    for (const image of editNewImages.value) {
+      const formData = new FormData()
+
+      formData.append('image', image)
+
+      const uploadResponse = await apiFetch(
+        `${API_URL}/notes/${noteId}/image`,
+        {
+          method: 'POST',
+          body: formData
+        }
+      )
+
+      if (!uploadResponse.ok) {
+        console.error(
+          'Failed to upload image:',
+          image.name
+        )
+
+        alert(
+          `Note updated, but ${image.name} could not be uploaded.`
+        )
+      }
+    }
+
+
+    /*
+    -------------------------------------------------------
+    5. Close modal and refresh
+    -------------------------------------------------------
+    */
+
+    closeEditModal(true)
 
     await getNotes()
+
   } catch (err) {
-    console.error(err)
+    console.error('Edit error:', err)
     alert('Failed to update note.')
+
+  } finally {
+    editLoading.value = false
   }
 }
 
-async function deleteNote(id) {
-  const confirmed = confirm('Are you sure you want to delete this note?')
 
-  if (!confirmed) {
+/*
+=========================================================
+DELETE MODAL
+=========================================================
+*/
+
+function openDeleteModal(note) {
+  noteToDelete.value = note
+
+  // Close viewer if delete was clicked there
+  selectedNote.value = null
+
+  showDeleteModal.value = true
+}
+
+
+function closeDeleteModal() {
+  if (deleteLoading.value) {
     return
   }
 
+  showDeleteModal.value = false
+  noteToDelete.value = null
+}
+
+
+/*
+=========================================================
+DELETE NOTE
+=========================================================
+*/
+
+async function confirmDelete() {
+  if (!noteToDelete.value) {
+    return
+  }
+
+  deleteLoading.value = true
+
   try {
-    const response = await apiFetch(`${API_URL}/notes/${id}`, {
-      method: 'DELETE'
-    })
+    const id = noteToDelete.value.id
+
+    const response = await apiFetch(
+      `${API_URL}/notes/${id}`,
+      {
+        method: 'DELETE'
+      }
+    )
 
     if (!response.ok) {
       throw new Error('Failed to delete note')
     }
 
-    // Close viewer if the deleted note was open
-    if (selectedNote.value?.id === id) {
-      selectedNote.value = null
-    }
+    closeDeleteModal()
 
     await getNotes()
+
   } catch (err) {
     console.error(err)
     alert('Failed to delete note.')
+
+  } finally {
+    deleteLoading.value = false
   }
 }
 
-// Open note viewer
+
+/*
+=========================================================
+NOTE VIEWER
+=========================================================
+*/
+
 function openNote(note) {
   selectedNote.value = note
 }
 
-// Close note viewer
+
 function closeNote() {
   selectedNote.value = null
 }
 
-// Close modal if user presses Escape
+
+/*
+=========================================================
+ESCAPE KEY
+=========================================================
+*/
+
 function handleKeydown(event) {
-  if (event.key === 'Escape') {
+  if (event.key !== 'Escape') {
+    return
+  }
+
+  if (showEditModal.value) {
+    closeEditModal()
+    return
+  }
+
+  if (showDeleteModal.value) {
+    closeDeleteModal()
+    return
+  }
+
+  if (selectedNote.value) {
     closeNote()
   }
 }
+
+
+/*
+=========================================================
+INITIALIZATION
+=========================================================
+*/
 
 onMounted(async () => {
   await initializeAuth()
@@ -265,9 +595,11 @@ onMounted(async () => {
     await getNotes()
   }
 
-  window.addEventListener('keydown', handleKeydown)
+  window.addEventListener(
+    'keydown',
+    handleKeydown
+  )
 })
-
 </script>
 
 <template>
@@ -279,14 +611,20 @@ onMounted(async () => {
     v-else-if="!isLoggedIn"
   />
 
-  <div v-else class="page">
+  <div
+    v-else
+    class="page"
+  >
     <div class="app">
 
       <!-- HEADER -->
       <header class="header">
+
         <div class="header-brand">
           <h1>My Notes</h1>
-          <p class="subtitle">AWS Notes App</p>
+          <p class="subtitle">
+            AWS Notes App
+          </p>
         </div>
 
         <div class="header-actions">
@@ -306,6 +644,7 @@ onMounted(async () => {
           </button>
 
         </div>
+
       </header>
 
 
@@ -319,16 +658,19 @@ onMounted(async () => {
       </div>
 
 
-      <!-- CREATE NOTE FORM -->
+      <!-- CREATE NOTE -->
       <div
         v-if="showForm"
         class="form-card"
       >
+
         <h2 class="form-title">
           Create Note
         </h2>
 
+
         <div class="form-field">
+
           <label for="note-title">
             Title
           </label>
@@ -339,9 +681,12 @@ onMounted(async () => {
             type="text"
             placeholder="Give your note a title"
           />
+
         </div>
 
+
         <div class="form-field">
+
           <label for="note-content">
             Content
           </label>
@@ -351,30 +696,59 @@ onMounted(async () => {
             v-model="content"
             placeholder="Write your note..."
           ></textarea>
+
         </div>
 
+
         <div class="form-field">
+
           <label for="image-input">
-            Image (optional)
+            Images (optional)
           </label>
 
           <input
             id="image-input"
             type="file"
             accept="image/*"
+            multiple
             class="file-input"
-            @change="handleImage"
+            @change="handleImages"
           />
+
         </div>
 
-        <p
-          v-if="selectedImage"
-          class="selected-image"
+
+        <!-- SELECTED IMAGES -->
+        <div
+          v-if="selectedImages.length"
+          class="selected-images"
         >
-          Selected: {{ selectedImage.name }}
-        </p>
+
+          <div
+            v-for="(image, index) in selectedImages"
+            :key="`${image.name}-${index}`"
+            class="selected-image-item"
+          >
+
+            <span>
+              {{ image.name }}
+            </span>
+
+            <button
+              type="button"
+              class="small-remove-button"
+              @click="removeNewImage(index)"
+            >
+              Remove
+            </button>
+
+          </div>
+
+        </div>
+
 
         <div class="form-buttons">
+
           <button
             class="save-button"
             @click="addNote"
@@ -390,7 +764,9 @@ onMounted(async () => {
           >
             Cancel
           </button>
+
         </div>
+
       </div>
 
 
@@ -401,6 +777,7 @@ onMounted(async () => {
           v-if="notes.length === 0"
           class="empty"
         >
+
           <p class="empty-title">
             No notes yet
           </p>
@@ -408,6 +785,7 @@ onMounted(async () => {
           <p class="empty-hint">
             Use Add Note to create your first note.
           </p>
+
         </div>
 
 
@@ -434,14 +812,18 @@ onMounted(async () => {
 
             <!-- IMAGE PREVIEW -->
             <div
-              v-if="note.imageUrl"
-              class="note-image-wrap"
+              v-if="getNoteImages(note).length"
+              class="note-images"
             >
+
               <img
-                :src="note.imageUrl"
+                v-for="(image, index) in getNoteImages(note)"
+                :key="image.key || index"
+                :src="image.url"
                 alt="Note image"
                 class="note-image"
               />
+
             </div>
 
 
@@ -453,14 +835,14 @@ onMounted(async () => {
 
               <button
                 class="edit-button"
-                @click="updateNote(note)"
+                @click="openEditModal(note)"
               >
                 Edit
               </button>
 
               <button
                 class="delete-button"
-                @click="deleteNote(note.id)"
+                @click="openDeleteModal(note)"
               >
                 Delete
               </button>
@@ -476,9 +858,9 @@ onMounted(async () => {
     </div>
 
 
-    <!-- ========================= -->
-    <!-- NOTE VIEWER MODAL -->
-    <!-- ========================= -->
+    <!-- ================================================= -->
+    <!-- NOTE VIEWER -->
+    <!-- ================================================= -->
 
     <div
       v-if="selectedNote"
@@ -488,7 +870,6 @@ onMounted(async () => {
 
       <div class="modal">
 
-        <!-- MODAL HEADER -->
         <div class="modal-header">
 
           <h2 class="modal-title">
@@ -506,7 +887,6 @@ onMounted(async () => {
         </div>
 
 
-        <!-- MODAL CONTENT -->
         <div class="modal-body">
 
           <p class="modal-content">
@@ -514,34 +894,43 @@ onMounted(async () => {
           </p>
 
 
-          <!-- FULL IMAGE -->
+          <!-- ALL IMAGES -->
           <div
-            v-if="selectedNote.imageUrl"
-            class="modal-image-wrap"
+            v-if="getNoteImages(selectedNote).length"
+            class="viewer-images"
           >
-            <img
-              :src="selectedNote.imageUrl"
-              alt="Full note image"
-              class="modal-image"
-            />
+
+            <div
+              v-for="(image, index) in getNoteImages(selectedNote)"
+              :key="image.key || index"
+              class="modal-image-wrap"
+            >
+
+              <img
+                :src="image.url"
+                alt="Note image"
+                class="modal-image"
+              />
+
+            </div>
+
           </div>
 
         </div>
 
 
-        <!-- MODAL ACTIONS -->
         <div class="modal-actions">
 
           <button
             class="modal-edit-button"
-            @click="updateNote(selectedNote)"
+            @click="openEditModal(selectedNote)"
           >
             Edit
           </button>
 
           <button
             class="modal-delete-button"
-            @click="deleteNote(selectedNote.id)"
+            @click="openDeleteModal(selectedNote)"
           >
             Delete
           </button>
@@ -551,6 +940,254 @@ onMounted(async () => {
             @click="closeNote"
           >
             Close
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <!-- ================================================= -->
+    <!-- EDIT MODAL -->
+    <!-- ================================================= -->
+
+    <div
+      v-if="showEditModal"
+      class="modal-overlay"
+      @click.self="closeEditModal"
+    >
+
+      <div class="modal edit-modal">
+
+        <div class="modal-header">
+
+          <h2 class="modal-title">
+            Edit Note
+          </h2>
+
+          <button
+            class="close-button"
+            @click="closeEditModal"
+            :disabled="editLoading"
+          >
+            ×
+          </button>
+
+        </div>
+
+
+        <div class="modal-body">
+
+          <!-- TITLE -->
+          <div class="form-field">
+
+            <label>
+              Title
+            </label>
+
+            <input
+              v-model="editTitle"
+              type="text"
+              placeholder="Note title"
+            />
+
+          </div>
+
+
+          <!-- CONTENT -->
+          <div class="form-field">
+
+            <label>
+              Content
+            </label>
+
+            <textarea
+              v-model="editContent"
+              placeholder="Note content"
+            ></textarea>
+
+          </div>
+
+
+          <!-- EXISTING IMAGES -->
+          <div
+            v-if="editExistingImages.length"
+            class="edit-section"
+          >
+
+            <label>
+              Existing Images
+            </label>
+
+            <div class="edit-images">
+
+              <div
+                v-for="(image, index) in editExistingImages"
+                :key="image.key || index"
+                class="edit-image-card"
+              >
+
+                <img
+                  :src="image.url"
+                  alt="Existing note image"
+                />
+
+                <button
+                  type="button"
+                  class="remove-image-button"
+                  @click="removeExistingImage(index)"
+                  :disabled="editLoading"
+                >
+                  Remove
+                </button>
+
+              </div>
+
+            </div>
+
+          </div>
+
+
+          <!-- NEW IMAGES -->
+          <div class="edit-section">
+
+            <label for="edit-image-input">
+              Add Images
+            </label>
+
+            <input
+              id="edit-image-input"
+              type="file"
+              accept="image/*"
+              multiple
+              class="file-input"
+              @change="handleEditImages"
+            />
+
+          </div>
+
+
+          <div
+            v-if="editNewImages.length"
+            class="edit-new-images"
+          >
+
+            <div
+              v-for="(image, index) in editNewImages"
+              :key="`${image.name}-${index}`"
+              class="new-image-item"
+            >
+
+              <span>
+                {{ image.name }}
+              </span>
+
+              <button
+                type="button"
+                class="small-remove-button"
+                @click="removeNewImage(index)"
+                :disabled="editLoading"
+              >
+                Remove
+              </button>
+
+            </div>
+
+          </div>
+
+        </div>
+
+
+        <div class="modal-actions">
+
+          <button
+            class="save-button"
+            @click="saveEdit"
+            :disabled="editLoading"
+          >
+            {{ editLoading ? 'Saving...' : 'Save Changes' }}
+          </button>
+
+          <button
+            class="cancel-button"
+            @click="closeEditModal"
+            :disabled="editLoading"
+          >
+            Cancel
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <!-- ================================================= -->
+    <!-- DELETE CONFIRMATION -->
+    <!-- ================================================= -->
+
+    <div
+      v-if="showDeleteModal"
+      class="modal-overlay"
+      @click.self="closeDeleteModal"
+    >
+
+      <div class="modal delete-modal">
+
+        <div class="modal-header">
+
+          <h2 class="modal-title">
+            Delete Note
+          </h2>
+
+          <button
+            class="close-button"
+            @click="closeDeleteModal"
+            :disabled="deleteLoading"
+          >
+            ×
+          </button>
+
+        </div>
+
+
+        <div class="modal-body delete-body">
+
+          <p>
+            Are you sure you want to delete
+            <strong>
+              "{{ noteToDelete?.title }}"
+            </strong>
+            ?
+          </p>
+
+          <p class="delete-warning">
+            This will permanently delete the note
+            and all of its images.
+          </p>
+
+        </div>
+
+
+        <div class="modal-actions">
+
+          <button
+            class="modal-delete-button"
+            @click="confirmDelete"
+            :disabled="deleteLoading"
+          >
+            {{ deleteLoading ? 'Deleting...' : 'Delete Note' }}
+          </button>
+
+          <button
+            class="cancel-button"
+            @click="closeDeleteModal"
+            :disabled="deleteLoading"
+          >
+            Cancel
           </button>
 
         </div>
@@ -1607,6 +2244,186 @@ textarea {
 
   .modal-image {
     max-height: 50vh;
+  }
+
+}
+
+/* =========================================
+   MULTIPLE IMAGES
+========================================= */
+
+.note-images {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.note-images .note-image {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+
+/* =========================================
+   SELECTED IMAGES
+========================================= */
+
+.selected-images {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: -8px;
+  margin-bottom: 20px;
+}
+
+.selected-image-item,
+.new-image-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--gray-50);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.small-remove-button {
+  flex-shrink: 0;
+  padding: 5px 9px;
+  background: var(--surface);
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.small-remove-button:hover:not(:disabled) {
+  background: var(--danger-muted);
+}
+
+
+/* =========================================
+   EDIT MODAL
+========================================= */
+
+.edit-modal {
+  width: min(700px, 100%);
+}
+
+.edit-section {
+  margin-top: 24px;
+}
+
+.edit-section > label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.edit-images {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.edit-image-card {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--gray-50);
+}
+
+.edit-image-card img {
+  display: block;
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+}
+
+.remove-image-button {
+  width: 100%;
+  padding: 8px;
+  background: var(--surface);
+  color: var(--danger);
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.remove-image-button:hover:not(:disabled) {
+  background: var(--danger-muted);
+}
+
+.edit-new-images {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+
+/* =========================================
+   VIEWER MULTIPLE IMAGES
+========================================= */
+
+.viewer-images {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.viewer-images .modal-image-wrap {
+  margin-top: 0;
+}
+
+
+/* =========================================
+   DELETE MODAL
+========================================= */
+
+.delete-modal {
+  width: min(500px, 100%);
+}
+
+.delete-body p {
+  margin: 0;
+}
+
+.delete-warning {
+  margin-top: 12px !important;
+  color: var(--danger);
+  font-size: 0.875rem;
+}
+
+
+/* =========================================
+   MOBILE
+========================================= */
+
+@media (max-width: 640px) {
+
+  .note-images {
+    grid-template-columns: 1fr;
+  }
+
+  .edit-images {
+    grid-template-columns: 1fr;
+  }
+
+  .edit-image-card img {
+    height: 180px;
   }
 
 }
