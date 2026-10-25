@@ -3,7 +3,7 @@ const COGNITO_DOMAIN =
 
 const CLIENT_ID = '1sipdb5kv8spd6dqbvkmgf5nbi'
 
-const REDIRECT_URI = 'http://localhost:5173/'
+const REDIRECT_URI = `${window.location.origin}/`
 
 export function login() {
   const params = new URLSearchParams({
